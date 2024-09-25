@@ -1,17 +1,81 @@
+import sqlite3
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
 import time
+import re
 
-# Function to send PAGE_DOWN key presses to scroll and load more products
+# Create or connect to a SQLite database
+def create_database():
+    try:
+        conn = sqlite3.connect('dispensary.db')  # Creates or connects to the database file
+        cursor = conn.cursor()
+
+        # Create the "flower" table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS flower (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Product TEXT,
+                Brand TEXT,
+                Potency REAL,  -- Changed to REAL to handle decimal percentages
+                Weight REAL,   -- Changed to REAL (to handle fractional numbers like 1/8)
+                Price REAL,    -- Changed to REAL to handle numeric prices
+                StrainType TEXT,
+                Location TEXT
+            )
+        ''')
+
+        # Commit the changes and close the connection
+        conn.commit()
+        print("Table created successfully or already exists.")
+    except Exception as e:
+        print(f"Error creating table: {e}")
+    finally:
+        conn.close()
+
+# Function to truncate the flower table (remove all rows)
+def truncate_table():
+    try:
+        conn = sqlite3.connect('dispensary.db')
+        cursor = conn.cursor()
+
+        # Delete all rows from the flower table
+        cursor.execute('DELETE FROM flower')
+        conn.commit()
+        print("Flower table truncated successfully.")
+    except Exception as e:
+        print(f"Error truncating table: {e}")
+    finally:
+        conn.close()
+
+# Ensure that the table is created before running the scraper
+create_database()
+
 def send_page_down(driver, num_times=10):
     body = driver.find_element(By.TAG_NAME, 'body')
     for _ in range(num_times):
         body.send_keys(Keys.PAGE_DOWN)
         print("Sent PAGE_DOWN key...")
         time.sleep(2)  # Allow content to load after each key press
+
+# Function to clean and convert fields
+def clean_potency(potency_str):
+    """ Remove the '%' and convert to float for handling decimal percentages. """
+    return float(potency_str.replace('%', '').strip()) if potency_str else None
+
+def clean_weight(weight_str):
+    """ Extract the numeric part of the weight (assumes input like '1/8 oz -'). """
+    weight_match = re.search(r'([\d/\.]+)', weight_str)
+    if weight_match:
+        # Handle fractional weights (e.g., 1/8 becomes 3.5)
+        return eval(weight_match.group(1))  # Convert fractions like '1/8' to decimal (3.5)
+    return None
+
+def clean_price(price_str):
+    """ Remove the '$' and convert to float. """
+    return float(price_str.replace('$', '').strip()) if price_str else None
 
 # Function to scrape the current page
 def scrape_current_page(driver):
@@ -39,6 +103,17 @@ def scrape_current_page(driver):
         details_tag = product.find('div', class_='mobile-product-list-item__DetailsContainer-zxgt1n-1')
         details = details_tag.text.strip() if details_tag else "No details found"
 
+        # Extract strain type and potency from details
+        strain_type = "Unknown"
+        potency = None
+
+        # Check if details contain the strain type (e.g., "Indica-Hybrid")
+        if "•" in details:
+            strain_type = details.split("•")[0].strip()  # Extract strain type
+            potency_match = re.search(r'THC:\s*([0-9.]+%)', details)
+            if potency_match:
+                potency = clean_potency(potency_match.group(1).strip())  # Clean and convert THC potency
+
         # Check for multiple weight/price options
         weight_price_container = product.find('div', class_='mobile-product-list-item__MultipleOptionsContainer-zxgt1n-2')
 
@@ -52,16 +127,18 @@ def scrape_current_page(driver):
                 price_tag = option.find('span', class_='weight-tile__PriceText-otzu8j-6')
 
                 if weight_tag and price_tag:
-                    weight = weight_tag.text.strip()
-                    price = price_tag.text.strip()
+                    weight = clean_weight(weight_tag.text.strip())
+                    price = clean_price(price_tag.text.strip())
 
                     # Append the product with the specific weight and price
                     products.append({
                         'name': name,
                         'brand': brand,
-                        'details': details,
+                        'strain_type': strain_type,
+                        'potency': potency,
                         'weight': weight,
-                        'price': price
+                        'price': price,
+                        'location': 'Greenlight'
                     })
         else:
             # In case there are no multiple weights/prices, handle the default product entry
@@ -69,15 +146,17 @@ def scrape_current_page(driver):
             price_tag = product.find('span', class_='weight-tile__PriceText-otzu8j-6')
 
             if weight_tag and price_tag:
-                weight = weight_tag.text.strip()
-                price = price_tag.text.strip()
+                weight = clean_weight(weight_tag.text.strip())
+                price = clean_price(price_tag.text.strip())
 
                 products.append({
                     'name': name,
                     'brand': brand,
-                    'details': details,
+                    'strain_type': strain_type,
+                    'potency': potency,
                     'weight': weight,
-                    'price': price
+                    'price': price,
+                    'location': 'Greenlight'
                 })
 
     return products
@@ -115,6 +194,34 @@ def scrape_all_pages(driver):
 
     return all_products
 
+# Function to insert products into the SQLite database
+def insert_into_database(products):
+    try:
+        conn = sqlite3.connect('dispensary.db')
+        cursor = conn.cursor()
+
+        for product in products:
+            cursor.execute('''
+                INSERT INTO flower (Product, Brand, Potency, Weight, Price, StrainType, Location)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                product['name'],
+                product['brand'],
+                product['potency'],
+                product['weight'],
+                product['price'],
+                product['strain_type'],
+                product['location']
+            ))
+
+        # Commit the transaction and close the connection
+        conn.commit()
+        print(f"Inserted {len(products)} products into the database.")
+    except Exception as e:
+        print(f"Error inserting into database: {e}")
+    finally:
+        conn.close()
+
 # Main function to run the scraper
 def scrape_data():
     # Path to your ChromeDriver
@@ -137,13 +244,15 @@ def scrape_data():
     # Scrape all pages
     all_products = scrape_all_pages(driver)
 
+    # Truncate the table before inserting new records
+    truncate_table()
+
+    # Insert all products into the database
+    insert_into_database(all_products)
+
     # Close the browser after scraping
     driver.quit()
 
-    return all_products
-
 # Example usage
 if __name__ == '__main__':
-    product_list = scrape_data()
-    for product in product_list:
-        print(f"Product: {product['name']}, Brand: {product['brand']}, Details: {product['details']}, Weight: {product['weight']}, Price: {product['price']}")
+    scrape_data()
