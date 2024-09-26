@@ -6,11 +6,13 @@ from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
 import time
 import re
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # Create or connect to a SQLite database
 def create_database():
     try:
-        conn = sqlite3.connect('dispensary.db')  # Creates or connects to the database file
+        conn = sqlite3.connect('../dispensary.db')  # Creates or connects to the database file
         cursor = conn.cursor()
 
         # Create the "flower" table
@@ -19,9 +21,9 @@ def create_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 Product TEXT,
                 Brand TEXT,
-                Potency REAL,  -- Changed to REAL to handle decimal percentages
-                Weight REAL,   -- Changed to REAL (to handle fractional numbers like 1/8)
-                Price REAL,    -- Changed to REAL to handle numeric prices
+                Potency REAL,
+                Weight REAL,
+                Price REAL,
                 StrainType TEXT,
                 Location TEXT
             )
@@ -35,30 +37,14 @@ def create_database():
     finally:
         conn.close()
 
-# Function to truncate the flower table (remove all rows)
-def truncate_table():
-    try:
-        conn = sqlite3.connect('dispensary.db')
-        cursor = conn.cursor()
-
-        # Delete all rows from the flower table
-        cursor.execute('DELETE FROM flower')
-        conn.commit()
-        print("Flower table truncated successfully.")
-    except Exception as e:
-        print(f"Error truncating table: {e}")
-    finally:
-        conn.close()
-
-# Ensure that the table is created before running the scraper
-create_database()
-
-def send_page_down(driver, num_times=10):
+# Function to send PAGE_DOWN key presses to scroll and load more products
+def send_page_down(driver, num_times=15):
+    """ Simulate PAGE_DOWN key presses to scroll the page. """
     body = driver.find_element(By.TAG_NAME, 'body')
     for _ in range(num_times):
         body.send_keys(Keys.PAGE_DOWN)
         print("Sent PAGE_DOWN key...")
-        time.sleep(2)  # Allow content to load after each key press
+        time.sleep(1)  # Allow content to load after each key press
 
 # Function to clean and convert fields
 def clean_potency(potency_str):
@@ -69,7 +55,6 @@ def clean_weight(weight_str):
     """ Extract the numeric part of the weight (assumes input like '1/8 oz -'). """
     weight_match = re.search(r'([\d/\.]+)', weight_str)
     if weight_match:
-        # Handle fractional weights (e.g., 1/8 becomes 3.5)
         return eval(weight_match.group(1))  # Convert fractions like '1/8' to decimal (3.5)
     return None
 
@@ -78,51 +63,38 @@ def clean_price(price_str):
     return float(price_str.replace('$', '').strip()) if price_str else None
 
 # Function to scrape the current page
-def scrape_current_page(driver):
-    # Get the page source after scrolling
+def scrape_current_page(driver, location):
     html = driver.page_source
-
-    # Use BeautifulSoup to parse the HTML
     soup = BeautifulSoup(html, 'html.parser')
-
     products = []
 
-    # Find all product items using the 'data-testid' attribute
     product_cards = soup.find_all('div', {'data-testid': 'product-list-item'})
 
     for product in product_cards:
-        # Extract the product name
         name_tag = product.find('span', class_='mobile-product-list-item__ProductName-zxgt1n-6')
         name = name_tag.text.strip() if name_tag else "No name found"
 
-        # Extract the brand
         brand_tag = product.find('span', class_='mobile-product-list-item__Brand-zxgt1n-3')
         brand = brand_tag.text.strip() if brand_tag else "No brand found"
 
-        # Extract the details (such as strain type, THC percentage)
         details_tag = product.find('div', class_='mobile-product-list-item__DetailsContainer-zxgt1n-1')
         details = details_tag.text.strip() if details_tag else "No details found"
 
-        # Extract strain type and potency from details
         strain_type = "Unknown"
         potency = None
 
-        # Check if details contain the strain type (e.g., "Indica-Hybrid")
         if "•" in details:
-            strain_type = details.split("•")[0].strip()  # Extract strain type
+            strain_type = details.split("•")[0].strip()
             potency_match = re.search(r'THC:\s*([0-9.]+%)', details)
             if potency_match:
-                potency = clean_potency(potency_match.group(1).strip())  # Clean and convert THC potency
+                potency = clean_potency(potency_match.group(1).strip())
 
-        # Check for multiple weight/price options
         weight_price_container = product.find('div', class_='mobile-product-list-item__MultipleOptionsContainer-zxgt1n-2')
 
-        # If multiple weight/price options exist
         if weight_price_container:
             weight_price_options = weight_price_container.find_all('button')
 
             for option in weight_price_options:
-                # Only process buttons with both weight and price spans
                 weight_tag = option.find('span', class_='weight-tile__Label-otzu8j-5')
                 price_tag = option.find('span', class_='weight-tile__PriceText-otzu8j-6')
 
@@ -130,7 +102,6 @@ def scrape_current_page(driver):
                     weight = clean_weight(weight_tag.text.strip())
                     price = clean_price(price_tag.text.strip())
 
-                    # Append the product with the specific weight and price
                     products.append({
                         'name': name,
                         'brand': brand,
@@ -138,10 +109,9 @@ def scrape_current_page(driver):
                         'potency': potency,
                         'weight': weight,
                         'price': price,
-                        'location': 'Greenlight'
+                        'location': location
                     })
         else:
-            # In case there are no multiple weights/prices, handle the default product entry
             weight_tag = product.find('span', class_='weight-tile__Label-otzu8j-5')
             price_tag = product.find('span', class_='weight-tile__PriceText-otzu8j-6')
 
@@ -156,38 +126,38 @@ def scrape_current_page(driver):
                     'potency': potency,
                     'weight': weight,
                     'price': price,
-                    'location': 'Greenlight'
+                    'location': location
                 })
 
     return products
 
-# Function to handle pagination and scrape all pages
-def scrape_all_pages(driver):
+# Updated function to handle pagination and scrape all pages
+def scrape_all_pages(driver, location):
     all_products = []
 
     while True:
-        # Scroll down to load all products on the current page
-        send_page_down(driver, num_times=10)
+        send_page_down(driver, num_times=15)  # Scroll down enough to load products
 
-        # Scrape the current page
-        products = scrape_current_page(driver)
+        products = scrape_current_page(driver, location)
         all_products.extend(products)
 
-        # Find the "Next" button
         try:
-            next_button = driver.find_element(By.CSS_SELECTOR, 'button[aria-label="go to next page"]')
+            # Scroll to the next button to make sure it's in view
+            next_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[aria-label="go to next page"]'))
+            )
 
-            # Check if the "Next" button is disabled (indicating the last page)
-            if not next_button.is_enabled():
-                break
+            # Scroll the next button into view
+            driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
 
-            # Click the "Next" button to go to the next page
-            print("Clicking the 'Next' button...")
+            # Add a small wait before clicking to ensure it’s clickable
+            time.sleep(2)
+
+            # Click the next button
             next_button.click()
 
             # Wait for the next page to load
-            time.sleep(3)
-
+            time.sleep(9)
         except Exception as e:
             print(f"Reached the last page or encountered an error: {e}")
             break
@@ -197,7 +167,7 @@ def scrape_all_pages(driver):
 # Function to insert products into the SQLite database
 def insert_into_database(products):
     try:
-        conn = sqlite3.connect('dispensary.db')
+        conn = sqlite3.connect('../dispensary.db')
         cursor = conn.cursor()
 
         for product in products:
@@ -214,7 +184,6 @@ def insert_into_database(products):
                 product['location']
             ))
 
-        # Commit the transaction and close the connection
         conn.commit()
         print(f"Inserted {len(products)} products into the database.")
     except Exception as e:
@@ -222,37 +191,38 @@ def insert_into_database(products):
     finally:
         conn.close()
 
-# Main function to run the scraper
-def scrape_data():
-    # Path to your ChromeDriver
-    driver_path = './chromedriver.exe'  # Replace with your actual path to chromedriver
+def handle_age_verification(driver):
+    try:
+        print("Waiting 70 seconds for the age verification to bypass automatically...")
+        time.sleep(80)  # Wait for 70 seconds to allow the age verification screen to bypass
+        print("Age verification screen should be bypassed now, proceeding with scrape.")
+    except Exception as e:
+        print(f"Encountered an error during wait: {e}, proceeding with scrape.")
 
-    # Set up the Service for ChromeDriver
+def scrape_data(urls_and_locations):
+    driver_path = '../chromedriver.exe'  # Replace with your actual path to chromedriver
     service = Service(driver_path)
 
-    # Set up Selenium WebDriver with the service
+    # Initialize the Selenium WebDriver
     driver = webdriver.Chrome(service=service)
-    driver.get('https://greenlightdispensary.com/cape-girardeau-menu/?dtche%5Bcategory%5D=flower')  # Replace with the actual URL
 
-    # Wait for the page to load completely
-    driver.implicitly_wait(10)
+    for url, location in urls_and_locations:
+        print(f"Scraping data for: {location}")
 
-    # Find the iframe element using the updated Selenium method
-    iframe = driver.find_element(By.CSS_SELECTOR, 'iframe.dutchie--iframe')  # Use the correct selector for the iframe
-    driver.switch_to.frame(iframe)  # Switch to the iframe
+        driver.get(url)
+        driver.implicitly_wait(15)
 
-    # Scrape all pages
-    all_products = scrape_all_pages(driver)
+        handle_age_verification(driver)
 
-    # Truncate the table before inserting new records
-    truncate_table()
+        iframe = driver.find_element(By.CSS_SELECTOR, 'iframe.dutchie--iframe')
+        driver.switch_to.frame(iframe)
 
-    # Insert all products into the database
-    insert_into_database(all_products)
+        all_products = scrape_all_pages(driver, location)
 
-    # Close the browser after scraping
+        insert_into_database(all_products)
+
     driver.quit()
 
-# Example usage
 if __name__ == '__main__':
-    scrape_data()
+    # List of URLs and their corresponding location names
+    scrape_data([('https://keycannabis.com/shop/cape-girardeau-mo/?dtche%5Bcategory%5D=flower', 'Elevate')])
